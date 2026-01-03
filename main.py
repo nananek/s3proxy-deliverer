@@ -2,68 +2,70 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path
+import uvicorn
 
 app = FastAPI()
 
-# コンテナ内のデータルート（docker-composeのボリュームマウント先に合わせる）
-# .resolve() で起動時に絶対パスを確定させておきます
-STORAGE_ROOT = Path("/data").resolve()
+# --- 設定の読み込み ---
+RAW_STORAGE_ROOT = os.getenv("STORAGE_ROOT", "/data")
+STORAGE_ROOT = Path(RAW_STORAGE_ROOT).resolve()
 
 @app.get("/{file_path:path}")
 async def serve_file(file_path: str):
-    # 1. 物理パスの構築
-    # リクエストされたパスとベースディレクトリを結合し、../ などを解決
+    # 1. 物理パス構築
     requested_path = (STORAGE_ROOT / file_path).resolve()
 
-    # 2. ディレクトリトラバーサル対策 (セキュリティの要)
-    # 解決後の絶対パスが、許可されたディレクトリ配下に収まっているかチェック
+    # 2. セキュリティチェック
     try:
         if not requested_path.is_relative_to(STORAGE_ROOT):
-            raise HTTPException(status_code=403, detail="Forbidden: Access denied")
+            raise HTTPException(status_code=403, detail="Forbidden")
     except ValueError:
-        # 親子関係にないパス（別のボリュームを指そうとした等）の場合
-        raise HTTPException(status_code=403, detail="Forbidden: Invalid path")
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-    # 3. ファイルの存在確認
+    # 3. 存在確認
     if not requested_path.exists() or not requested_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=404)
 
-    # 4. xattr（拡張属性）からのメタデータ復元
-    headers = {
-        "X-Content-Type-Options": "nosniff", # MIMEタイプの誤認防止
-    }
-    
+    # 4. xattr からメタデータ取得
+    headers = {"X-Content-Type-Options": "nosniff"}
     try:
-        # S3Proxyが書き込んだ各属性を読み取る
-        # Pythonの os.getxattr は Linux環境で 'user.user.xxx' のように指定します
         mime_type = os.getxattr(requested_path, "user.user.content-type").decode('utf-8')
-        
-        # オプショナルな属性（存在しない可能性があるもの）の取得
         try:
             headers["Cache-Control"] = os.getxattr(requested_path, "user.user.cache-control").decode('utf-8')
         except OSError:
-            headers["Cache-Control"] = "max-age=31536000, immutable" # デフォルト値
-
+            headers["Cache-Control"] = "max-age=31536000, immutable"
         try:
             headers["Content-Disposition"] = os.getxattr(requested_path, "user.user.content-disposition").decode('utf-8')
         except OSError:
-            # 取得できない場合はインライン表示をデフォルトに
             headers["Content-Disposition"] = "inline"
-
     except OSError:
-        # 万が一 mime-type すら取れない場合のフォールバック
         mime_type = "application/octet-stream"
         headers["Cache-Control"] = "no-cache"
 
-    # 5. ファイル配信の実行
-    # FileResponse は内部で aiofiles を使い、ノンブロッキングで動作します
-    return FileResponse(
-        path=requested_path,
-        media_type=mime_type,
-        headers=headers
-    )
+    return FileResponse(path=requested_path, media_type=mime_type, headers=headers)
 
 if __name__ == "__main__":
-    import uvicorn
-    # Dockerコンテナ内からのリクエストを受けるため 0.0.0.0 で待機
-    uvicorn.run(app, host="0.0.0.0", port=80)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "80"))
+    workers = int(os.getenv("WORKERS", "4"))
+    uds_path = os.getenv("UDS_PATH") # 例: /tmp/uvicorn.sock
+
+    config = {
+        "app": "main:app",
+        "workers": workers,
+        "proxy_headers": True,
+        "forwarded_allow_ips": "*"
+    }
+
+    if uds_path:
+        # --- Unix Domain Socket モード ---
+        # 既存のソケットファイルがある場合は削除
+        if os.path.exists(uds_path):
+            os.remove(uds_path)
+        
+        print(f"--- Starting FastAPI on UDS: {uds_path} ---")
+        uvicorn.run(**config, uds=uds_path)
+    else:
+        # --- TCP モード ---
+        print(f"--- Starting FastAPI on TCP: {host}:{port} ---")
+        uvicorn.run(**config, host=host, port=port)
