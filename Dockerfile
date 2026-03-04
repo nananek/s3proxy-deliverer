@@ -4,7 +4,8 @@ FROM python:3.12-slim AS builder
 WORKDIR /app
 
 # 依存関係のインストール
-RUN pip install --no-cache-dir fastapi uvicorn
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # --- 実行ステージ ---
 FROM python:3.12-slim
@@ -20,12 +21,16 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # アプリケーションコードをコピー
-COPY main.py .
+COPY main.py requirements.txt ./
 
 # 2. 指定のディレクトリ作成と権限変更
-# /data (ストレージ用) と /var/run/s3proxy-deliverer (UDS用など)
+# /data: ストレージ用 (読み取り専用アクセス)
+# /var/run/s3proxy-deliverer: UDS ソケット用 (書き込み必要)
 RUN mkdir -p /data /var/run/s3proxy-deliverer && \
-    chown -R appuser:appuser /app /data /var/run/s3proxy-deliverer
+    chown root:appuser /data && chmod 750 /data && \
+    chown appuser:appuser /app /var/run/s3proxy-deliverer
+
+EXPOSE 80
 
 # 環境変数の設定
 ENV STORAGE_ROOT=/data \

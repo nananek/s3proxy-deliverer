@@ -50,11 +50,13 @@ if __name__ == "__main__":
     workers = int(os.getenv("WORKERS", "4"))
     uds_path = os.getenv("UDS_PATH") # 例: /tmp/uvicorn.sock
 
+    forwarded_allow_ips = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+
     config = {
         "app": "main:app",
         "workers": workers,
         "proxy_headers": True,
-        "forwarded_allow_ips": "*"
+        "forwarded_allow_ips": forwarded_allow_ips
     }
 
     if uds_path:
